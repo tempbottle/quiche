@@ -2377,3 +2377,4 @@ mod ranges;
 mod recovery;
 mod stream;
 mod tls;
+pub mod h3;
