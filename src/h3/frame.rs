@@ -125,11 +125,10 @@ pub enum H3Frame {
     },
 
     Priority {
-        // TODO: parse PT and DT to determine if PEID or EDID will be present
         priority_elem: PrioritizedElemType,
         elem_dependency: ElemDependencyType,
-        prioritized_element_id: u64,
-        element_dependency_id: u64,
+        prioritized_element_id: Option<u64>,
+        element_dependency_id: Option<u64>,
         weight: u8
     },
 
@@ -235,16 +234,14 @@ impl H3Frame {
                                 element_dependency_id,
                                 weight,
                                  } => {
-                let peid_present = priority_elem.is_peid_absent();
-                let edid_present = elem_dependency.is_edid_absent();
 
                 let mut length = 2 * mem::size_of::<u8>(); // 2 u8s = (PT+DT+Empty) + Weight
-                if peid_present {
-                    length += octets::varint_len(*prioritized_element_id);
+                if prioritized_element_id.is_some() {
+                    length += octets::varint_len(prioritized_element_id.unwrap());
                 }
 
-                if edid_present {
-                    length += octets::varint_len(*element_dependency_id);
+                if element_dependency_id.is_some() {
+                    length += octets::varint_len(element_dependency_id.unwrap());
                 }
 
                 b.put_varint(length as u64)?;
@@ -255,11 +252,11 @@ impl H3Frame {
 
                 b.put_u8(bitfield)?;
 
-                if peid_present {
-                    b.put_varint(*prioritized_element_id)?;
+                if prioritized_element_id.is_some() {
+                    b.put_varint(prioritized_element_id.unwrap())?;
                 }
-                if edid_present {
-                    b.put_varint(*element_dependency_id)?;
+                if element_dependency_id.is_some() {
+                    b.put_varint(element_dependency_id.unwrap())?;
                 }
 
                 b.put_u8(*weight)?;
@@ -391,7 +388,7 @@ impl std::fmt::Debug for H3Frame {
             },
 
             H3Frame::Priority { priority_elem, elem_dependency, prioritized_element_id, element_dependency_id, weight } => {
-                write!(f, "PRIORITY priority element type={:?} element dependency type={:?} prioritized element id={} element dependency id={} weight={}", priority_elem, elem_dependency, prioritized_element_id, element_dependency_id, weight)?;
+                write!(f, "PRIORITY priority element type={:?} element dependency type={:?} prioritized element id={} element dependency id={} weight={}", priority_elem, elem_dependency, prioritized_element_id.unwrap(), element_dependency_id.unwrap(), weight)?;
             },
 
             H3Frame::CancelPush { push_id } => {
@@ -455,22 +452,20 @@ fn parse_settings_frame(payload_length: u64, b: &mut octets::Octets) -> Result<H
 }
 
 fn parse_priority_frame(b: &mut octets::Octets) -> Result<H3Frame> {
-    // TODO: parse PT and DT to determine if PEID or EDID will be present
-
     let bitfield = b.get_u8()?;
-    let mut prioritized_element_id = 0;
-    let mut element_dependency_id = 0;
+    let mut prioritized_element_id = None;
+    let mut element_dependency_id = None;
 
     let priority_elem = PrioritizedElemType::from_bits(bitfield >> 6);
 
     let elem_dependency = ElemDependencyType::from_bits((bitfield & ELEM_DEPENDENCY_TYPE_MASK) >> 4);
 
     if !priority_elem.is_peid_absent() {
-        prioritized_element_id = b.get_varint()?;
+        prioritized_element_id = Some(b.get_varint()?);
     }
 
     if !elem_dependency.is_edid_absent() {
-        element_dependency_id = b.get_varint()?;
+        element_dependency_id = Some(b.get_varint()?);
     }
 
 
@@ -539,16 +534,15 @@ mod tests {
         }
     }
 
-    /*#[test]
-    fn priority() {
-        // TODO: parse PT and DT to determine if PEID or EDID will be present
+    #[test]
+    fn priority_current_stream_to_root() {
         let mut d: [u8; 128] = [42; 128];
 
         let frame = H3Frame::Priority {
             priority_elem: PrioritizedElemType::CurrentStream,
             elem_dependency: ElemDependencyType::RootOfTree,
-            prioritized_element_id: 0,
-            element_dependency_id: 0,
+            prioritized_element_id: None,
+            element_dependency_id: None,
             weight: 16
         };
 
@@ -557,13 +551,87 @@ mod tests {
             frame.to_bytes(&mut b).unwrap()
         };
 
-        assert_eq!(wire_len, 17);
+        assert_eq!(wire_len, 4);
 
         {
             let mut b = octets::Octets::with_slice(&mut d);
             assert_eq!(H3Frame::from_bytes(&mut b).unwrap(), frame);
         }
-    }*/
+    }
+
+    #[test]
+    fn priority_placeholder_to_root() {
+        let mut d: [u8; 128] = [42; 128];
+
+        let frame = H3Frame::Priority {
+            priority_elem: PrioritizedElemType::Placeholder,
+            elem_dependency: ElemDependencyType::RootOfTree,
+            prioritized_element_id: Some(0),
+            element_dependency_id: None,
+            weight: 16
+        };
+
+        let wire_len = {
+            let mut b = octets::Octets::with_slice(&mut d);
+            frame.to_bytes(&mut b).unwrap()
+        };
+
+        assert_eq!(wire_len, 5);
+
+        {
+            let mut b = octets::Octets::with_slice(&mut d);
+            assert_eq!(H3Frame::from_bytes(&mut b).unwrap(), frame);
+        }
+    }
+
+    #[test]
+    fn priority_current_stream_to_placeholder() {
+        let mut d: [u8; 128] = [42; 128];
+
+        let frame = H3Frame::Priority {
+            priority_elem: PrioritizedElemType::CurrentStream,
+            elem_dependency: ElemDependencyType::Placeholder,
+            prioritized_element_id: None,
+            element_dependency_id: Some(0),
+            weight: 16
+        };
+
+        let wire_len = {
+            let mut b = octets::Octets::with_slice(&mut d);
+            frame.to_bytes(&mut b).unwrap()
+        };
+
+        assert_eq!(wire_len, 5);
+
+        {
+            let mut b = octets::Octets::with_slice(&mut d);
+            assert_eq!(H3Frame::from_bytes(&mut b).unwrap(), frame);
+        }
+    }
+
+    fn priority_some_stream_to_placeholder() {
+        let mut d: [u8; 128] = [42; 128];
+
+        let frame = H3Frame::Priority {
+            priority_elem: PrioritizedElemType::RequestStream,
+            elem_dependency: ElemDependencyType::Placeholder,
+            prioritized_element_id: Some(0x4),
+            element_dependency_id: Some(0),
+            weight: 16
+        };
+
+        let wire_len = {
+            let mut b = octets::Octets::with_slice(&mut d);
+            frame.to_bytes(&mut b).unwrap()
+        };
+
+        assert_eq!(wire_len, 5);
+
+        {
+            let mut b = octets::Octets::with_slice(&mut d);
+            assert_eq!(H3Frame::from_bytes(&mut b).unwrap(), frame);
+        }
+    }
 
     #[test]
     fn cancel_push() {
