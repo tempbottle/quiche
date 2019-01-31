@@ -262,6 +262,11 @@ impl H3Connection {
         }
     }
 
+    fn is_control_stream(stream_id: u64) -> bool {
+        //TODO make this respect stream types and NOT assume types from ID
+        return stream_id == 0x2 || stream_id == 0x3
+    }
+
     fn get_encoder_stream_id(&mut self) -> u64 {
         // TODO get an available unidirectional stream ID more nicely
         if self.quic_conn.is_server {
@@ -320,6 +325,37 @@ impl H3Connection {
 
             // TODO await ACK of stream open?
             self.qpack_decoder_stream_open = true;
+        }
+    }
+
+    pub fn create_placeholder_tree(&mut self) {
+        if self.num_placeholders > 0 {
+            debug!("Going to prioritse {} placeholders", self.num_placeholders);
+            // TODO make sure slice is large enough to hold
+            // *all* PRIORITY frames. Worst case is ~7 bytes per frame.
+            let mut d: [u8; 255] = [42; 255];
+            let mut b = octets::Octets::with_slice(&mut d);
+
+            let mut weight = 0;
+            for i in 0 .. self.num_placeholders {
+                let frame = frame::H3Frame::Priority {
+                    priority_elem: frame::PrioritizedElemType::Placeholder,
+                    elem_dependency: frame::ElemDependencyType::RootOfTree,
+                    prioritized_element_id: Some(i),
+                    element_dependency_id: None,
+                    weight: weight
+                };
+
+                frame.to_bytes(&mut b).unwrap();
+
+                weight += 1;
+            }
+
+            let off = b.off();
+            debug!("Amount of priority bytes to send is {}", off);
+            let stream_id = self.get_control_stream_id();
+
+            self.quic_conn.stream_send(stream_id, &mut d[..off], false).unwrap();
         }
     }
 
@@ -392,75 +428,98 @@ impl H3Connection {
         }
     }
 
-    pub fn handle_stream(&mut self, stream: u64) -> Result<()> {
-        let mut stream_data = self.quic_conn.stream_recv(stream, std::usize::MAX)?;
+    pub fn handle_stream(&mut self, stream_id: u64) -> Result<()> {
+        let mut stream_data = self.quic_conn.stream_recv(stream_id, std::usize::MAX)?;
         info!("{} stream {} has {} bytes (fin? {})", self.quic_conn.trace_id(),
-            stream, stream_data.len(), stream_data.fin());
+            stream_id, stream_data.len(), stream_data.fin());
+
+        let stream_data_len = stream_data.len();
 
         // H3 unidirectional streams have types as first byte
-        if !stream::is_bidi(stream) {
-            if stream_data.off() == 0 {
+        if !stream::is_bidi(stream_id) {
+            let mut o = octets::Octets::with_slice(&mut stream_data);
+            while o.off() <  stream_data_len {
+                //trace!("loop de loop");
                 //dbg!(&stream_data);
-                let mut o = octets::Octets::with_slice(&mut stream_data);
-                let stream_type = o.get_u8().unwrap();
-                match stream_type {
-                    H3_CONTROL_STREAM_TYPE_ID => {
-                        info!("{} stream {} is a control stream", self.quic_conn.trace_id(), stream);
-                        if self.peer_control_stream_open {
-                            // Error, only one control stream allowed
-                            let err = H3Error::WrongStreamCount;
-                            self.quic_conn.close(true, err.to_wire(), b"")?;
-                        } else {
-                            //dbg!(&mut stream_data);
-                            //let mut o = octets::Octets::with_slice(&mut stream_data);
-                            let frame = frame::H3Frame::from_bytes(&mut o).unwrap();
-                            debug!("received {:?}", frame);
-
-                            match frame {
-                                frame::H3Frame::Settings { num_placeholders, max_header_list_size, qpack_max_table_capacity, qpack_blocked_streams} => {
-                                    if self.quic_conn.is_server && num_placeholders.is_some() {
-                                        let err = H3Error::WrongSettingDirection;
-                                        self.quic_conn.close(true, err.to_wire(), b"You sent me a num_placeholders.")?;
-                                    } else {
-                                        self.peer_num_placeholders = num_placeholders;
-                                        self.peer_max_header_list_size = max_header_list_size;
-                                        self.peer_qpack_max_table_capacity = qpack_max_table_capacity;
-                                        self.peer_qpack_blocked_streams = qpack_blocked_streams;
-                                        self.peer_control_stream_open = true;
-                                    }
-                                },
-                                _ => {
-                                   debug!("Settings frame must be first on control stream! Received type={:?}", frame);
-                                   let err = H3Error::MissingSettings;
-                                    self.quic_conn.close(true, err.to_wire(), b"Non-settings sent as first frame.")?;
-                                }
+                if o.off() == 0 {
+                    let stream_type = o.get_u8().unwrap();
+                    info!("{} stream {} has type value {}", self.quic_conn.trace_id(), stream_id, stream_type);
+                    match stream_type {
+                        H3_CONTROL_STREAM_TYPE_ID => {
+                            info!("{} stream {} is a control stream", self.quic_conn.trace_id(), stream_id);
+                            if self.peer_control_stream_open {
+                                // Error, only one control stream allowed
+                                let err = H3Error::WrongStreamCount;
+                                self.quic_conn.close(true, err.to_wire(), b"")?;
+                            } else {
+                                //dbg!(&mut stream_data);
                             }
+                        },
+                        H3_PUSH_STREAM_TYPE_ID => {
+                            info!("{} stream {} is a push stream", self.quic_conn.trace_id(), stream_id);
+                        },
+                        QPACK_ENCODER_STREAM_TYPE_ID => {
+                            info!("{} stream {} is a QPACK encoder stream", self.quic_conn.trace_id(), stream_id);
+                            if self.peer_qpack_encoder_stream_open {
+                                // Error, only one control stream allowed
+                                let err = H3Error::WrongStreamCount;
+                                self.quic_conn.close(true, err.to_wire(), b"")?;
+                            }
+                        },
+                        QPACK_DECODER_STREAM_TYPE_ID => {
+                            info!("{} stream {} is a QPACK decoder stream", self.quic_conn.trace_id(), stream_id);
+                            if self.peer_qpack_decoder_stream_open {
+                                // Error, only one control stream allowed
+                                let err = H3Error::WrongStreamCount;
+                                self.quic_conn.close(true, err.to_wire(), b"")?;
+                            }
+                        },
+                        _ => {
+                            info!("{} stream {} is an unknown stream type (val={})!", self.quic_conn.trace_id(), stream_id, stream_type);
+                        },
+                    }
+                } else if o.off() == 1 {
+                    let frame = frame::H3Frame::from_bytes(&mut o).unwrap();
+                    debug!("first received frame on stream {} is {:?}", stream_id, frame);
 
+                    match frame {
+                        frame::H3Frame::Settings { num_placeholders, max_header_list_size, qpack_max_table_capacity, qpack_blocked_streams} => {
+                            if self.quic_conn.is_server && num_placeholders.is_some() {
+                                let err = H3Error::WrongSettingDirection;
+                                self.quic_conn.close(true, err.to_wire(), b"You sent me a num_placeholders.")?;
+                            } else {
+                                self.peer_num_placeholders = num_placeholders;
+                                self.peer_max_header_list_size = max_header_list_size;
+                                self.peer_qpack_max_table_capacity = qpack_max_table_capacity;
+                                self.peer_qpack_blocked_streams = qpack_blocked_streams;
+                                self.peer_control_stream_open = true;
+                            }
+                        },
+                        _ => {
+                            error!("SETTINGS frame must be first on control stream! Received type={:?}", frame);
+                            let err = H3Error::MissingSettings;
+                            self.quic_conn.close(true, err.to_wire(), b"Non-settings sent as first frame.")?;
+                        }
+                    }
+                } else { // after first SETTINGS, most frames are OK
+                    let frame = frame::H3Frame::from_bytes(&mut o).unwrap();
+                    debug!("addtional received frame on stream {} is {:?}", stream_id, frame);
 
+                    match frame {
+                        frame::H3Frame::Settings { num_placeholders, max_header_list_size, qpack_max_table_capacity, qpack_blocked_streams} => {
+                            debug!("SETTINGS frame must be first on control stream! Received type={:?}", frame);
+                            let err = H3Error::UnexpectedFrame;
+                            self.quic_conn.close(true, err.to_wire(), b"You sent me SETTINGS too late.")?;
+                        },
+                        frame::H3Frame::Priority{priority_elem, elem_dependency, prioritized_element_id, element_dependency_id, weight } => {
+                            debug!("Priority frame received.")
+                        },
+                        _ => {
+                            debug!("Unsupported frame must be first on control stream! Received type={:?}", frame);
+                            let err = H3Error::MissingSettings;
+                            self.quic_conn.close(true, err.to_wire(), b"Non-settings sent as first frame.")?;
                         }
-                    },
-                    H3_PUSH_STREAM_TYPE_ID => {
-                        info!("{} stream {} is a push stream", self.quic_conn.trace_id(), stream);
-                    },
-                    QPACK_ENCODER_STREAM_TYPE_ID => {
-                        info!("{} stream {} is a QPACK encoder stream", self.quic_conn.trace_id(), stream);
-                        if self.peer_qpack_encoder_stream_open {
-                            // Error, only one control stream allowed
-                            let err = H3Error::WrongStreamCount;
-                            self.quic_conn.close(true, err.to_wire(), b"")?;
-                        }
-                    },
-                    QPACK_DECODER_STREAM_TYPE_ID => {
-                        info!("{} stream {} is a QPACK decoder stream", self.quic_conn.trace_id(), stream);
-                        if self.peer_qpack_decoder_stream_open {
-                            // Error, only one control stream allowed
-                            let err = H3Error::WrongStreamCount;
-                            self.quic_conn.close(true, err.to_wire(), b"")?;
-                        }
-                    },
-                    _ => {
-                        info!("{} stream {} is an unknown stream type (val={})!", self.quic_conn.trace_id(), stream, stream_type);
-                    },
+                    }
                 }
             }
         } else {
@@ -490,14 +549,14 @@ impl H3Connection {
                             }
 
                             info!("{} got GET request for {:?} on stream {}",
-                                self.quic_conn.trace_id(), path, stream);
+                                self.quic_conn.trace_id(), path, stream_id);
 
                             // TODO *actually* response with something other than 404
-                            self.send_response(stream, String::from("404 Not Found"), String::from(""));
+                            self.send_response(stream_id, String::from("404 Not Found"), String::from(""));
 
                         } else if &header_block[..4] == b"404 " {
                             info!("{} got 404 response on stream {}",
-                                self.quic_conn.trace_id(), stream);
+                                self.quic_conn.trace_id(), stream_id);
 
                             if stream_data.fin() {
                                 info!("{} response received, closing..,", self.quic_conn.trace_id());
@@ -507,7 +566,7 @@ impl H3Connection {
                     },
 
                     _ => {
-                        debug!("Frame not implemented/supported on bidi stream! type={:?}", frame);
+                        debug!("TODO: Frame not implemented/supported on bidi stream! type={:?}", frame);
                     },
                 };
             }

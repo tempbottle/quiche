@@ -388,7 +388,17 @@ impl std::fmt::Debug for H3Frame {
             },
 
             H3Frame::Priority { priority_elem, elem_dependency, prioritized_element_id, element_dependency_id, weight } => {
-                write!(f, "PRIORITY priority element type={:?} element dependency type={:?} prioritized element id={} element dependency id={} weight={}", priority_elem, elem_dependency, prioritized_element_id.unwrap(), element_dependency_id.unwrap(), weight)?;
+                let peid = match prioritized_element_id {
+                    Some(x) => x.to_string(),
+                    None => String::from("None")
+                };
+
+                let edid = match element_dependency_id {
+                    Some(x) => x.to_string(),
+                    None => String::from("None")
+                };
+
+                write!(f, "PRIORITY priority element type={:?} element dependency type={:?} prioritized element id={:?} element dependency id={:?} weight={:?}", priority_elem, elem_dependency, peid, edid, weight)?;
             },
 
             H3Frame::CancelPush { push_id } => {

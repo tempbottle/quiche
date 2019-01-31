@@ -140,7 +140,7 @@ fn main() {
                 continue;
             }
 
-            let (_, conn) = if !h3connections.contains_key(&hdr.dcid) {
+            let (_, h3conn) = if !h3connections.contains_key(&hdr.dcid) {
                 if hdr.ty != quiche::Type::Initial {
                     error!("Packet is not Initial");
                     continue;
@@ -199,36 +199,37 @@ fn main() {
             };
 
             // Process potentially coalesced packets.
-            let read = match conn.quic_conn.recv(buf) {
+            let read = match h3conn.quic_conn.recv(buf) {
                 Ok(v)  => v,
 
                 Err(quiche::Error::Done) => {
-                    debug!("{} done reading", conn.quic_conn.trace_id());
+                    debug!("{} done reading", h3conn.quic_conn.trace_id());
                     break;
                 },
 
                 Err(e) => {
-                    error!("{} recv failed: {:?}", conn.quic_conn.trace_id(), e);
-                    conn.quic_conn.close(false, e.to_wire(), b"fail").unwrap();
+                    error!("{} recv failed: {:?}", h3conn.quic_conn.trace_id(), e);
+                    h3conn.quic_conn.close(false, e.to_wire(), b"fail").unwrap();
                     break 'read;
                 },
             };
 
-            debug!("{} processed {} bytes", conn.quic_conn.trace_id(), read);
+            debug!("{} processed {} bytes", h3conn.quic_conn.trace_id(), read);
 
-            if conn.quic_conn.is_established() {
+            if h3conn.quic_conn.is_established() {
                 // TODO make opening control streams saner
-                if !conn.is_established() {
-                    conn.send_settings();
-                    conn.open_qpack_streams();
+                if !h3conn.is_established() {
+                    h3conn.send_settings();
+                    h3conn.open_qpack_streams();
                 }
             }
 
 
-            let streams: Vec<u64> = conn.quic_conn.readable().collect();
+            let streams: Vec<u64> = h3conn.quic_conn.readable().collect();
             for s in streams {
-                info!("{} stream {} is readable", conn.quic_conn.trace_id(), s);
-                if conn.handle_stream(s).is_err() {
+                info!("{} stream {} is readable", h3conn.quic_conn.trace_id(), s);
+                if h3conn.handle_stream(s).is_err() {
+                    info!("{} stream {} read error, skipping rest of streams...", h3conn.quic_conn.trace_id(), s);
                     break;
                 }
             }

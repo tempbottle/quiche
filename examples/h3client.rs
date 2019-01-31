@@ -167,7 +167,9 @@ fn main() {
                 h3conn.open_qpack_streams();
             }
 
-            info!("{} sending HTTP request for {}", h3conn.quic_conn.trace_id(), url.path());
+            h3conn.create_placeholder_tree();
+
+            //info!("{} sending HTTP request for {}", h3conn.quic_conn.trace_id(), url.path());
 
             let req = if args.get_bool("--http1") {
                 format!("GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: quiche\r\n\r\n",
@@ -184,6 +186,7 @@ fn main() {
         for s in streams {
             info!("{} stream {} is readable", h3conn.quic_conn.trace_id(), s);
             if h3conn.handle_stream(s).is_err() {
+                info!("{} stream {} read error, skipping rest of streams...", h3conn.quic_conn.trace_id(), s);
                 break;
             }
 
