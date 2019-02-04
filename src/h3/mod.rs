@@ -429,18 +429,20 @@ impl H3Connection {
     }
 
     pub fn handle_stream(&mut self, stream_id: u64) -> Result<()> {
-        let mut stream_data = self.quic_conn.stream_recv(stream_id, std::usize::MAX)?;
-        info!("{} stream {} has {} bytes (fin? {})", self.quic_conn.trace_id(),
-            stream_id, stream_data.len(), stream_data.fin());
+        let mut buf = [0; 65535];
+        let (read, fin) = self.quic_conn.stream_recv(stream_id, &mut buf)?;
+        let mut stream_buf = &mut buf[..read];
 
-        let stream_data_len = stream_data.len();
+        let stream_buf_len = stream_buf.len();
+        info!("{} stream {} has {} bytes (fin? {})", self.quic_conn.trace_id(),
+            stream_id, stream_buf_len, fin);
 
         // H3 unidirectional streams have types as first byte
         if !stream::is_bidi(stream_id) {
-            let mut o = octets::Octets::with_slice(&mut stream_data);
-            while o.off() <  stream_data_len {
+            let mut o = octets::Octets::with_slice(&mut stream_buf);
+            while o.off() <  stream_buf_len {
                 //trace!("loop de loop");
-                //dbg!(&stream_data);
+                //dbg!(&stream_buf);
                 if o.off() == 0 {
                     let stream_type = o.get_u8().unwrap();
                     info!("{} stream {} has type value {}", self.quic_conn.trace_id(), stream_id, stream_type);
@@ -452,7 +454,7 @@ impl H3Connection {
                                 let err = H3Error::WrongStreamCount;
                                 self.quic_conn.close(true, err.to_wire(), b"")?;
                             } else {
-                                //dbg!(&mut stream_data);
+                                //dbg!(&mut stream_buf);
                             }
                         },
                         H3_PUSH_STREAM_TYPE_ID => {
@@ -524,8 +526,8 @@ impl H3Connection {
             }
         } else {
             // TODO stream frame parsing
-            if stream_data.len() > 1 {
-                let mut o = octets::Octets::with_slice(&mut stream_data);
+            if stream_buf.len() > 1 {
+                let mut o = octets::Octets::with_slice(&mut stream_buf);
                 let frame = frame::H3Frame::from_bytes(&mut o).unwrap();
                 debug!("received {:?}", frame);
 
@@ -558,7 +560,7 @@ impl H3Connection {
                             info!("{} got 404 response on stream {}",
                                 self.quic_conn.trace_id(), stream_id);
 
-                            if stream_data.fin() {
+                            if fin {
                                 info!("{} response received, closing..,", self.quic_conn.trace_id());
                                 self.quic_conn.close(true, 0x00, b"kthxbye").unwrap();
                             }
